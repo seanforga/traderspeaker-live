@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Live momentum narration</title>
+<style>
+  html,body{margin:0;background:#000;color:#fff;font-family:-apple-system,system-ui,sans-serif;font-size:22px;line-height:1.45}
+  main{max-width:46rem;margin:0 auto;padding:1.2rem}
+  h1{font-size:1.6rem;margin:.4rem 0 1rem}
+  #play{display:block;width:100%;min-height:9rem;font-size:2.2rem;font-weight:700;border:4px solid #fff;border-radius:1rem;background:#ffd400;color:#000;cursor:pointer}
+  #play:focus{outline:6px solid #4fc3ff;outline-offset:4px}
+  #play.on{background:#fff}
+  #status{font-size:1.3rem;margin:1.2rem 0;font-weight:600}
+  h2{font-size:1.4rem;margin-top:1.5rem}
+  #lines li{margin:.6rem 0;font-size:1.2rem}
+</style>
+</head>
+<body>
+<main>
+  <h1>Live momentum narration</h1>
+  <button id="play" type="button" aria-label="Play live narration">Play live narration</button>
+  <p id="status" role="status" aria-live="polite">Press Play once. New lines will then play automatically.</p>
+  <h2 id="lines-h">What the narrator said</h2>
+  <ul id="lines" aria-labelledby="lines-h" aria-live="polite" aria-relevant="additions"></ul>
+  <audio id="player" preload="auto" playsinline></audio>
+</main>
+<script>
+(function(){
+  var TOPIC = "fif-momentum-do17o6c853";
+  var BASE = "https://ntfy.sh/" + TOPIC;
+  var RECENT_SECS = 120;
+  // 0.1 s silent WAV, used to unlock audio on iOS inside the tap
+  var SILENT = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
+  var btn = document.getElementById("play"), statusEl = document.getElementById("status"),
+      list = document.getElementById("lines"), audio = document.getElementById("player");
+  var playing = false, started = false, startTime = 0, seen = {}, queue = [], busy = false,
+      es = null, gen = 0, pollTimer = null, lastTime = 0, sseFails = 0;
+
+  function setStatus(t){ statusEl.textContent = t; }
+  function idle(){ if (playing) setStatus(seenCount() ? "Listening, next line plays automatically." : "Listening. Waiting for market lines."); }
+  function seenCount(){ return list.children.length; }
+
+  function addLine(m){
+    var li = document.createElement("li");
+    var d = new Date(m.time * 1000);
+    var t = d.toLocaleTimeString("en-US", {hour:"numeric", minute:"2-digit", timeZone:"America/Denver"});
+    li.textContent = m.message + " (" + t + " Mountain)";
+    list.appendChild(li);
+  }
+
+  function handle(m){
+    if (!m || m.event !== "message" || !m.id || seen[m.id]) return;
+    seen[m.id] = true;
+    if (m.time > lastTime) lastTime = m.time;
+    if (m.time < startTime) return;           // older than when Play was pressed
+    addLine(m);
+    queue.push(m);
+    next();
+  }
+
+  function speak(text, done){
+    try {
+      if (!window.speechSynthesis) { done(); return; }
+      var u = new SpeechSynthesisUtterance(text);
+      u.lang = "en-US"; u.rate = 1;
+      var finished = false, fin = function(){ if (!finished){ finished = true; done(); } };
+      u.onend = fin; u.onerror = fin;
+      setTimeout(fin, Math.max(8000, text.length * 120)); // safety if onend never fires
+      speechSynthesis.speak(u);
+    } catch(e){ done(); }
+  }
+
+  function next(){
+    if (busy || !playing || !queue.length) { if (!busy) idle(); return; }
+    busy = true;
+    var m = queue.shift(), g = gen;
+    setStatus("Playing a new line.");
+    var done = function(){ if (g !== gen) return; busy = false; next(); };
+    var url = m.attachment && m.attachment.url;
+    if (!url) { speak(m.message, done); return; }
+    var settled = false;
+    var ok = function(){ if (!settled){ settled = true; cleanup(); done(); } };
+    var fail = function(){ if (!settled){ settled = true; cleanup(); if (g === gen && playing) speak(m.message, done); } };
+    var guard = setTimeout(fail, 15000);   // never started within 15 s
+    function onPlaying(){ clearTimeout(guard); guard = setTimeout(ok, 120000); }
+    function cleanup(){ clearTimeout(guard); audio.onended = audio.onerror = null; audio.removeEventListener("playing", onPlaying); }
+    audio.onended = ok; audio.onerror = fail;
+    audio.addEventListener("playing", onPlaying);
+    audio.src = url;
+    var p = audio.play();
+    if (p && p.catch) p.catch(fail);
+  }
+
+  function poll(sinceArg){
+    return fetch(BASE + "/json?poll=1&since=" + sinceArg, {cache:"no-store"})
+      .then(function(r){ return r.text(); })
+      .then(function(txt){
+        txt.split("\n").forEach(function(l){ if (l.trim()) { try { handle(JSON.parse(l)); } catch(e){} } });
+      });
+  }
+
+  function startPolling(){
+    if (pollTimer) return;
+    pollTimer = setInterval(function(){ if (playing) poll(lastTime ? lastTime : startTime).catch(function(){}); }, 3000);
+  }
+
+  function startSSE(){
+    if (!window.EventSource) { startPolling(); return; }
+    try {
+      es = new EventSource(BASE + "/sse?since=" + startTime);
+      es.onmessage = function(e){ sseFails = 0; try { handle(JSON.parse(e.data)); } catch(x){} };
+      es.onerror = function(){ sseFails++; if (sseFails >= 2) startPolling(); };
+      es.onopen = function(){ sseFails = 0; };
+    } catch(e){ startPolling(); }
+    // belt and braces: a slow poll catches anything SSE missed (duplicates are ignored by id)
+    setInterval(function(){ if (playing && !pollTimer) poll(lastTime ? lastTime : startTime).catch(function(){}); }, 20000);
+  }
+
+  function unlock(){
+    try { audio.muted = false; audio.src = SILENT; var p = audio.play(); if (p && p.catch) p.catch(function(){}); } catch(e){}
+    try { if (window.speechSynthesis){ var u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); } } catch(e){}
+  }
+
+  btn.addEventListener("click", function(){
+    if (!playing) {
+      unlock();
+      playing = true;
+      btn.textContent = "Pause"; btn.setAttribute("aria-label", "Pause"); btn.className = "on";
+      if (!started) {
+        started = true;
+        var now = Math.floor(Date.now() / 1000);
+        setStatus("Connecting.");
+        // most recent line, if under 2 minutes old
+        fetch(BASE + "/json?poll=1&since=" + (now - RECENT_SECS), {cache:"no-store"})
+          .then(function(r){ return r.text(); })
+          .then(function(txt){
+            var msgs = [];
+            txt.split("\n").forEach(function(l){ if (l.trim()) { try { var m = JSON.parse(l); if (m.event === "message") msgs.push(m); } catch(e){} } });
+            msgs.forEach(function(m){ seen[m.id] = true; if (m.time > lastTime) lastTime = m.time; });
+            startTime = now;
+            if (msgs.length) { var last = msgs[msgs.length - 1]; delete seen[last.id]; var st = startTime; startTime = 0; handle(last); startTime = st; }
+          })
+          .catch(function(){ startTime = now; })
+          .then(function(){ startSSE(); idle(); });
+      } else { idle(); next(); }
+    } else {
+      playing = false; gen++;
+      try { audio.pause(); } catch(e){}
+      try { speechSynthesis.cancel(); } catch(e){}
+      busy = false;
+      btn.textContent = "Play live narration"; btn.setAttribute("aria-label", "Play live narration"); btn.className = "";
+      setStatus("Paused. New lines are saved and play when you press Play.");
+    }
+  });
+})();
+</script>
+</body>
+</html>
