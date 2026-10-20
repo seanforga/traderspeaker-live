@@ -102,7 +102,7 @@
 
   function startPolling(){
     if (pollTimer) return;
-    pollTimer = setInterval(function(){ if (playing) poll(lastTime ? lastTime : startTime).catch(function(){}); }, 3000);
+    pollTimer = setInterval(function(){ if (playing) poll(lastTime ? lastTime - 1 : startTime - 1).catch(function(){}); }, 3000);
   }
 
   function startSSE(){
@@ -114,7 +114,7 @@
       es.onopen = function(){ sseFails = 0; };
     } catch(e){ startPolling(); }
     // belt and braces: a slow poll catches anything SSE missed (duplicates are ignored by id)
-    setInterval(function(){ if (playing && !pollTimer) poll(lastTime ? lastTime : startTime).catch(function(){}); }, 20000);
+    setInterval(function(){ if (playing && !pollTimer) poll(lastTime ? lastTime - 1 : startTime - 1).catch(function(){}); }, 20000);
   }
 
   function unlock(){
