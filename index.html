@@ -29,7 +29,7 @@
 (function(){
   var TOPIC = "fif-momentum-do17o6c853";
   var BASE = "https://ntfy.sh/" + TOPIC;
-  var RECENT_SECS = 120;
+  var RECENT_SECS = 300;
   // 0.1 s silent WAV, used to unlock audio on iOS inside the tap
   var SILENT = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=";
   var btn = document.getElementById("play"), statusEl = document.getElementById("status"),
@@ -85,6 +85,18 @@
     var guard = setTimeout(fail, 15000);   // never started within 15 s
     function onPlaying(){ clearTimeout(guard); guard = setTimeout(ok, 120000); }
     function cleanup(){ clearTimeout(guard); audio.onended = audio.onerror = null; audio.removeEventListener("playing", onPlaying); }
+    if (actx) {
+      fetch(url, {cache:"no-store"}).then(function(r){ return r.arrayBuffer(); })
+        .then(function(b){ return new Promise(function(res, rej){ actx.decodeAudioData(b, res, rej); }); })
+        .then(function(buf){
+          if (settled) return; clearTimeout(guard);
+          var src = actx.createBufferSource(); src.buffer = buf; src.connect(actx.destination);
+          src.onended = ok; guard = setTimeout(ok, (buf.duration + 5) * 1000);
+          if (actx.state !== "running") { try { actx.resume(); } catch(e){} }
+          src.start(0);
+        }).catch(fail);
+      return;
+    }
     audio.onended = ok; audio.onerror = fail;
     audio.addEventListener("playing", onPlaying);
     audio.src = url;
@@ -117,7 +129,9 @@
     setInterval(function(){ if (playing && !pollTimer) poll(lastTime ? lastTime - 1 : startTime - 1).catch(function(){}); }, 20000);
   }
 
+  var actx = null;
   function unlock(){
+    try { var AC = window.AudioContext || window.webkitAudioContext; if (AC) { if (!actx) actx = new AC(); actx.resume(); var o = actx.createBuffer(1, 1, 22050), sn = actx.createBufferSource(); sn.buffer = o; sn.connect(actx.destination); sn.start(0); } } catch(e){ actx = null; }
     try { audio.muted = false; audio.src = SILENT; var p = audio.play(); if (p && p.catch) p.catch(function(){}); } catch(e){}
     try { if (window.speechSynthesis){ var u = new SpeechSynthesisUtterance(" "); u.volume = 0; speechSynthesis.speak(u); } } catch(e){}
   }
